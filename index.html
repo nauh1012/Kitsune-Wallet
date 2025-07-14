@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Kitsune BTC Wallet</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="manifest" href="manifest.json">
+  <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+  <style>
+    body {
+      background: #111;
+      color: #fff;
+      font-family: sans-serif;
+      text-align: center;
+      padding: 20px;
+      font-size: 20px;
+      zoom: 1.4;
+    }
+    input, button, label, textarea {
+      margin: 10px;
+      padding: 14px;
+      border-radius: 10px;
+      border: none;
+      width: 95%;
+      max-width: 600px;
+      font-size: 18px;
+    }
+    button {
+      background-color: orange;
+      color: #111;
+      font-weight: bold;
+      cursor: pointer;
+    }
+    textarea {
+      height: 120px;
+    }
+    img {
+      margin-bottom: 10px;
+      width: 120px;
+    }
+    .flex {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+<body>
+  <img src="kitsune.png" alt="Kitsune">
+  <h2>Kitsune BTC Wallet</h2>
+
+  <div class="flex">
+    <input type="text" id="clavePublica" placeholder="Public address (bc1...)">
+    <button onclick="guardarDireccion()">💾</button>
+    <button onclick="borrarDireccion()">🗑️</button>
+  </div>
+
+  <div class="flex">
+    <button onclick="mostrarQR()">Receive</button>
+    <button onclick="verSaldo()">Balance</button>
+    <button onclick="mostrarEnvio()">Send</button>
+  </div>
+
+  <div id="qr"></div>
+  <div id="saldo" style="margin-top: 10px;"></div>
+
+  <div id="envio" style="display:none;">
+    <input type="text" id="destino" placeholder="Recipient address">
+    <input type="number" id="montoBTC" placeholder="Amount in BTC" step="0.00000001">
+    <button onclick="generarPSBT()">Generate transaction</button>
+    <textarea id="psbt" readonly placeholder="PSBT base64"></textarea>
+    <button onclick="descargarPSBT()">Download PSBT</button>
+
+    <br><br>
+    <label>Upload signed transaction (.txt):</label><br>
+    <input type="file" id="archivoTx" accept=".txt"><br>
+    <button onclick="transmitir()">Broadcast transaction</button>
+  </div>
+
+  <script>
+    let deferredPrompt;
+
+    // Load saved address
+    window.onload = () => {
+      const saved = localStorage.getItem("clavePublica");
+      if (saved) document.getElementById("clavePublica").value = saved;
+    };
+
+    function guardarDireccion() {
+      const clave = document.getElementById("clavePublica").value.trim();
+      if (clave) {
+        localStorage.setItem("clavePublica", clave);
+        alert("Address saved");
+      }
+    }
+
+    function borrarDireccion() {
+      localStorage.removeItem("clavePublica");
+      document.getElementById("clavePublica").value = "";
+      alert("Address deleted");
+    }
+
+    function mostrarQR() {
+      const clave = document.getElementById("clavePublica").value.trim();
+      if (!clave) return alert("Enter your address.");
+      document.getElementById("envio").style.display = "none";
+      document.getElementById("qr").innerHTML = "";
+      QRCode.toCanvas(clave, { width: 256 }, (err, canvas) => {
+        if (err) return console.error(err);
+        document.getElementById("qr").appendChild(canvas);
+      });
+    }
+
+    function verSaldo() {
+      const clave = document.getElementById("clavePublica").value.trim();
+      if (!clave) return alert("Enter an address.");
+      fetch(`https://blockstream.info/api/address/${clave}`)
+        .then(res => res.json())
+        .then(async data => {
+          const sats = data.chain_stats.funded_txo_sum - data.chain_stats.spent_txo_sum;
+          const btc = sats / 100000000;
+          const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd,ars");
+          const priceData = await res.json();
+          const usd = priceData.bitcoin.usd;
+          const ars = priceData.bitcoin.ars;
+          const usdValue = `$${(btc * usd).toFixed(2)} USD`;
+          const arsValue = `$${(btc * ars).toFixed(2)} ARS`;
+          document.getElementById("saldo").innerText = `Balance: ${btc.toFixed(8)} BTC (~${usdValue} | ~${arsValue})`;
+        })
+        .catch(() => {
+          document.getElementById("saldo").innerText = "Error fetching balance.";
+        });
+    }
+
+    function mostrarEnvio() {
+      document.getElementById("qr").innerHTML = "";
+      document.getElementById("envio").style.display = "block";
+    }
+
+    async function generarPSBT() {
+      const origen = document.getElementById("clavePublica").value.trim();
+      const destino = document.getElementById("destino").value.trim();
+      const montoBTC = parseFloat(document.getElementById("montoBTC").value);
+      if (!origen || !destino || isNaN(montoBTC) || montoBTC <= 0) {
+        return alert("Please complete all fields correctly.");
+      }
+      const montoSats = Math.round(montoBTC * 100_000_000);
+      const res = await fetch("https://blockstream.info/api/address/" + origen + "/utxo");
+      const utxos = await res.json();
+      if (!utxos.length) return alert("No funds available.");
+
+      let total = 0;
+      const inputs = [];
+      const txs = {};
+      for (const utxo of utxos) {
+        const hex = await fetch(`https://blockstream.info/api/tx/${utxo.txid}/hex`).then(r => r.text());
+        txs[utxo.txid] = hex;
+        inputs.push({
+          hash: utxo.txid,
+          index: utxo.vout,
+          nonWitnessUtxo: hex
+        });
+        total += utxo.value;
+        if (total >= montoSats + 1000) break;
+      }
+      if (total < montoSats + 1000) return alert("Insufficient funds.");
+
+      const tx = {
+        inputs: inputs.map(i => ({
+          txid: i.hash,
+          vout: i.index
+        })),
+        outputs: [
+          { address: destino, value: montoSats },
+          { address: origen, value: total - montoSats - 1000 }
+        ]
+      };
+
+      const psbt = await import("https://cdn.jsdelivr.net/npm/bitcoinjs-lib@6.1.0/+esm").then(btc => {
+        const psbt = new btc.Psbt({ network: btc.networks.bitcoin });
+        for (const inp of inputs) {
+          psbt.addInput({
+            hash: inp.hash,
+            index: inp.index,
+            nonWitnessUtxo: Buffer.from(txs[inp.hash], "hex")
+          });
+        }
+        for (const out of tx.outputs) {
+          psbt.addOutput(out);
+        }
+        return psbt.toBase64();
+      });
+
+      document.getElementById("psbt").value = psbt;
+    }
+
+    function descargarPSBT() {
+      const psbt = document.getElementById("psbt").value.trim();
+      if (!psbt) return alert("No PSBT generated.");
+      const blob = new Blob([psbt], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "psbt_base64.txt";
+      a.click();
+    }
+
+    function transmitir() {
+      const archivo = document.getElementById("archivoTx").files[0];
+      if (!archivo) return alert("Select a signed file (.txt)");
+      const lector = new FileReader();
+      lector.onload = function (e) {
+        const hex = e.target.result.trim();
+        fetch("https://blockstream.info/api/tx", {
+          method: "POST",
+          body: hex,
+          headers: { "Content-Type": "text/plain" }
+        })
+        .then(res => res.ok ? res.text() : Promise.reject(res.statusText))
+        .then(hash => alert("Transaction sent!\nHash: " + hash))
+        .catch(err => alert("Error sending: " + err));
+      };
+      lector.readAsText(archivo);
+    }
+
+    // Install prompt
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js')
+          .then(() => console.log("✅ Service Worker registered"))
+          .catch(err => console.error("❌ SW registration failed:", err));
+      });
+
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        deferredPrompt = e;
+        alert("✅ You can install this wallet from your browser menu: 'Add to Home screen'.");
+      });
+    }
+  </script>
+</body>
+</html>

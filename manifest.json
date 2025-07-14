@@ -1,0 +1,22 @@
+{
+  "name": "Kitsune BTC Wallet",
+  "short_name": "Kitsune Wallet",
+  "description": "Simple Bitcoin wallet to receive, check balance and send signed transactions.",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#111111",
+  "theme_color": "#ff9900",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "kitsune.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "kitsune.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
